@@ -17,9 +17,9 @@ static std::vector<float> g_currentClicks;
 
 // PART 1: record where you click
 class $modify(RecordLayer, GJBaseGameLayer) {
-    void pushButton(int button, bool isPlayer1) {
-        GJBaseGameLayer::pushButton(button, isPlayer1);
-        if (m_player1) g_currentClicks.push_back(m_player1->getPositionX());
+    void handleButton(bool down, int button, bool isPlayer1) {
+        GJBaseGameLayer::handleButton(down, button, isPlayer1);
+        if (down && m_player1) g_currentClicks.push_back(m_player1->getPositionX());
     }
 };
 
