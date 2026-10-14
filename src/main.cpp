@@ -14,32 +14,33 @@
 using namespace geode::prelude;
 
 // ================= SETTINGS YOU CAN TWEAK =================
-const float BASE_LOOKAHEAD = 300.f; // how far ahead bars show (at speed 1x)
-const float PANEL_W        = 70.f;
-const float PANEL_H        = 170.f;
-const float MARGIN         = 10.f;  // distance from the screen corner
-const float HIT_Y          = 38.f;  // height of the hit zone
-const float TOP_Y          = PANEL_H - 14.f;
-const float NOTE_W         = 28.f;  // bar width
-const float MIN_H          = 6.f;   // shortest a bar can be
-const float GAP            = 3.f;   // empty space between back-to-back bars
-const float GREEN_ZONE     = 14.f;  // how close to the line a bar must be to go green
+const float LOOK_SECONDS  = 1.0f;   // how many seconds ahead the bars show (at speed 1x)
+const float MARGIN        = 10.f;   // distance from the screen corner
+const float CX            = 62.f;   // center of the highway
+const float LANE_W        = 84.f;   // width of the highway at the bottom
+const float FAR_SCALE     = 0.42f;  // how narrow it gets at the top (smaller = more perspective)
+const float PERSP_K       = 1.6f;   // how much bars speed up near the line
+const float HIT_Y         = 30.f;   // height of the hit bar
+const float TOP_Y         = 175.f;  // height of the top of the highway
+const float NOTE_FRAC     = 0.82f;  // bar width compared to the lane
+const float MIN_H         = 12.f;   // shortest a bar can be
+const float GAP           = 4.f;    // empty space between back-to-back bars
+const float GRID_UNITS    = 80.f;   // spacing of the faint rungs
+const float GREEN_SEC     = 0.05f;  // how close to the line a bar must be to turn green
 
-const float PERFECT_W      = 10.f;  // click within this distance = PERFECT
-const float GOOD_W         = 28.f;  // click within this distance = GOOD (later = MISS)
+const float PERFECT_MS    = 35.f;   // click within this = PERFECT
+const float GOOD_MS       = 90.f;   // click within this = GOOD (later = MISS)
 
-const float DEATH_MARGIN   = 100.f; // clicks this close to where you died are not saved
-const float CONNECT_SLACK  = 150.f; // attempt must start near saved part to add to it
+const float DEATH_MARGIN  = 100.f;  // clicks this close to where you died are not saved
+const float CONNECT_SLACK = 150.f;  // attempt must start near saved part to add to it
 
 // ================= COLORS =================
-const ccColor4F COL_PANEL       = {0.05f, 0.06f, 0.11f, 0.78f};
-const ccColor4F COL_BORDER      = {1.f, 1.f, 1.f, 0.14f};
-const ccColor4F COL_LANE        = {1.f, 1.f, 1.f, 0.045f};
-const ccColor4F COL_ZONE_OFF    = {1.f, 1.f, 1.f, 0.10f};
-const ccColor4F COL_ZONE_ON     = {0.35f, 1.f, 0.55f, 0.35f};
-const ccColor4F COL_ZONE_BORDER = {1.f, 1.f, 1.f, 0.45f};
-const ccColor4F COL_NOTE        = {0.30f, 0.80f, 1.f, 1.f};   // cyan
-const ccColor4F COL_ACTIVE      = {0.35f, 1.f, 0.55f, 1.f};   // green
+const ccColor4F COL_LANE   = {0.02f, 0.06f, 0.05f, 0.72f};
+const ccColor4F COL_RAIL   = {0.30f, 1.f, 0.55f, 0.95f};
+const ccColor4F COL_GRID   = {0.30f, 1.f, 0.55f, 0.16f};
+const ccColor4F COL_NOTE   = {0.30f, 0.80f, 1.f, 1.f};    // cyan
+const ccColor4F COL_ACTIVE = {0.35f, 1.f, 0.55f, 1.f};    // green
+const ccColor4F COL_GOLD   = {1.f, 0.78f, 0.25f, 1.f};
 const ccColor3B C_PERFECT = {255, 214, 92};
 const ccColor3B C_GOOD    = {110, 255, 150};
 const ccColor3B C_MISS    = {255, 90, 90};
@@ -66,9 +67,24 @@ static float g_attemptMaxX   = 0.f;
 static bool  g_attemptActive = false;
 static PlayLayer* g_layer    = nullptr;
 
+static float g_lastX     = 0.f;
+static float g_vel       = 311.58f; // how fast the player moves (units per second), smoothed
 static bool  g_holding   = false;
 static float g_speed     = 1.f;
 static bool  g_popupOpen = false;
+
+static ccColor4F withAlpha(ccColor4F c, float a) {
+    c.a = a;
+    return c;
+}
+
+// Filled four-sided shape (bottom-left, bottom-right, top-right, top-left)
+static void quad(CCDrawNode* n, CCPoint a, CCPoint b, CCPoint c, CCPoint d,
+                 ccColor4F fill, float borderW = 0.f,
+                 ccColor4F border = {0.f, 0.f, 0.f, 0.f}) {
+    CCPoint pts[4] = {a, b, c, d};
+    n->drawPolygon(pts, 4, fill, borderW, border);
+}
 
 // Save this attempt's new clicks into the level's chart
 static void commitAttempt(bool finished, float finishX) {
@@ -100,6 +116,8 @@ static void startAttempt(PlayLayer* pl) {
     g_attemptStartX = pl->m_player1 ? pl->m_player1->getPositionX() : 0.f;
     g_attemptMaxX = g_attemptStartX;
     g_attemptActive = true;
+    g_lastX = g_attemptStartX;
+    g_vel = 311.58f;
 
     auto& notes = g_charts[g_attemptId].notes;
     g_state.assign(notes.size(), 0);
@@ -107,28 +125,6 @@ static void startAttempt(PlayLayer* pl) {
         // notes behind where we spawned (practice checkpoints) don't count
         if (notes[i].start < g_attemptStartX) g_state[i] = 2;
     }
-}
-
-// Filled rounded rectangle (optional border)
-static void roundedRect(CCDrawNode* n, float x, float y, float w, float h, float r,
-                        ccColor4F fill, float borderW = 0.f,
-                        ccColor4F border = {0.f, 0.f, 0.f, 0.f}) {
-    if (w <= 0.f || h <= 0.f) return;
-    r = std::min(r, std::min(w, h) / 2.f);
-    const float PI = 3.14159265f;
-    const int seg = 8;
-    std::vector<CCPoint> pts;
-    auto arc = [&](float cx, float cy, float a0) {
-        for (int i = 0; i <= seg; i++) {
-            float a = a0 + (PI / 2.f) * i / seg;
-            pts.push_back({cx + r * cosf(a), cy + r * sinf(a)});
-        }
-    };
-    arc(x + w - r, y + r,     -PI / 2.f);
-    arc(x + w - r, y + h - r, 0.f);
-    arc(x + r,     y + h - r, PI / 2.f);
-    arc(x + r,     y + r,     PI);
-    n->drawPolygon(pts.data(), pts.size(), fill, borderW, border);
 }
 
 // ================= PART 1: record presses and releases =================
@@ -251,16 +247,16 @@ class $modify(HighwayLayer, PlayLayer) {
         PlayLayer::levelComplete();
     }
 
-    void showJudge(char const* text, ccColor3B color) {
+    void showJudge(std::string const& text, ccColor3B color) {
         auto l = m_fields->judge;
         if (!l) return;
-        l->setString(text);
+        l->setString(text.c_str());
         l->setColor(color);
         l->stopAllActions();
         l->setOpacity(255);
-        l->setScale(0.38f);
-        l->runAction(CCScaleTo::create(0.1f, 0.3f));
-        l->runAction(CCSequence::create(CCDelayTime::create(0.4f), CCFadeOut::create(0.3f), nullptr));
+        l->setScale(0.36f);
+        l->runAction(CCScaleTo::create(0.1f, 0.28f));
+        l->runAction(CCSequence::create(CCDelayTime::create(0.5f), CCFadeOut::create(0.3f), nullptr));
     }
 
     void postUpdate(float dt) {
@@ -284,9 +280,9 @@ class $modify(HighwayLayer, PlayLayer) {
             m_fields->draw = node;
 
             auto label = CCLabelBMFont::create("", "bigFont.fnt");
-            label->setScale(0.3f);
+            label->setScale(0.28f);
             label->setOpacity(0);
-            label->setPosition({MARGIN + PANEL_W / 2.f, MARGIN + 16.f});
+            label->setPosition({MARGIN + CX, MARGIN + 7.f});
             label->setZOrder(1001);
             m_uiLayer->addChild(label);
             m_fields->judge = label;
@@ -294,6 +290,15 @@ class $modify(HighwayLayer, PlayLayer) {
 
         float px = m_player1->getPositionX();
         if (g_attemptActive && px > g_attemptMaxX) g_attemptMaxX = px;
+
+        // measure how fast the player is moving (smoothed), so speed portals don't change the bars
+        if (dt > 0.0001f && px > g_lastX) {
+            float inst = (px - g_lastX) / dt;
+            if (inst > 100.f && inst < 1000.f) {
+                g_vel += (inst - g_vel) * (1.f - expf(-dt / 0.25f));
+            }
+        }
+        g_lastX = px;
 
         auto draw = m_fields->draw;
         draw->clear();
@@ -304,9 +309,10 @@ class $modify(HighwayLayer, PlayLayer) {
         if (g_state.size() != notes.size()) g_state.resize(notes.size(), 0);
 
         // ---- judge your presses ----
+        float goodU = GOOD_MS / 1000.f * g_vel; // window in level units
         for (float pressX : g_presses) {
             int best = -1;
-            float bestD = GOOD_W + 0.01f;
+            float bestD = goodU + 0.01f;
             for (size_t i = 0; i < notes.size(); i++) {
                 if (g_state[i] != 0) continue;
                 float d = std::fabs(notes[i].start - pressX);
@@ -314,15 +320,16 @@ class $modify(HighwayLayer, PlayLayer) {
             }
             if (best >= 0) {
                 g_state[best] = 1;
-                if (bestD <= PERFECT_W) showJudge("PERFECT", C_PERFECT);
-                else showJudge("GOOD", C_GOOD);
+                float ms = (pressX - notes[best].start) / g_vel * 1000.f;
+                if (std::fabs(ms) <= PERFECT_MS) showJudge(fmt::format("PERFECT {:+.0f}ms", ms), C_PERFECT);
+                else showJudge(fmt::format("GOOD {:+.0f}ms", ms), C_GOOD);
             }
         }
         g_presses.clear();
 
         // ---- notes you let pass = MISS ----
         for (size_t i = 0; i < notes.size(); i++) {
-            if (g_state[i] == 0 && px > notes[i].start + GOOD_W) {
+            if (g_state[i] == 0 && px > notes[i].start + goodU) {
                 g_state[i] = 2;
                 showJudge("MISS", C_MISS);
             }
@@ -331,24 +338,43 @@ class $modify(HighwayLayer, PlayLayer) {
         if (notes.empty()) return;
 
         // ---- draw the highway ----
-        float look = BASE_LOOKAHEAD * g_speed;
-        float cx = PANEL_W / 2.f;
+        float look   = std::max(g_vel * LOOK_SECONDS * g_speed, 50.f);
+        float yRange = TOP_Y - HIT_Y;
 
-        // panel and lane
-        roundedRect(draw, 0.f, 0.f, PANEL_W, PANEL_H, 14.f, COL_PANEL, 1.f, COL_BORDER);
-        roundedRect(draw, cx - NOTE_W / 2.f - 5.f, 8.f, NOTE_W + 10.f, PANEL_H - 16.f, 10.f, COL_LANE);
-
-        // hit zone (lights up while you hold)
-        roundedRect(draw, cx - NOTE_W / 2.f - 5.f, HIT_Y - 8.f, NOTE_W + 10.f, 16.f, 8.f,
-                    g_holding ? COL_ZONE_ON : COL_ZONE_OFF, 1.f,
-                    g_holding ? COL_ACTIVE : COL_ZONE_BORDER);
-
-        // distance ahead -> height on the panel
-        auto yOf = [&](float d) {
-            d = std::clamp(d, 0.f, look);
-            return HIT_Y + (d / look) * (TOP_Y - HIT_Y);
+        // distance ahead -> how far up the highway (0 to 1), speeding up near the line
+        auto fOf = [&](float d) {
+            float u = std::clamp(d / look, 0.f, 1.f);
+            return (1.f + PERSP_K) * u / (1.f + PERSP_K * u);
         };
+        auto yOfF = [&](float f) { return HIT_Y + f * yRange; };
+        auto wOfF = [&](float f) { return LANE_W * (1.f - (1.f - FAR_SCALE) * f); };
 
+        float y0 = HIT_Y - 14.f;
+        float w0 = wOfF(0.f);
+        float w1 = wOfF(1.f);
+
+        // lane background
+        quad(draw, {CX - w0 / 2.f, y0}, {CX + w0 / 2.f, y0},
+                   {CX + w1 / 2.f, TOP_Y}, {CX - w1 / 2.f, TOP_Y}, COL_LANE);
+
+        // glowing side rails
+        draw->drawSegment({CX - w0 / 2.f, y0}, {CX - w1 / 2.f, TOP_Y}, 3.5f, withAlpha(COL_RAIL, 0.12f));
+        draw->drawSegment({CX + w0 / 2.f, y0}, {CX + w1 / 2.f, TOP_Y}, 3.5f, withAlpha(COL_RAIL, 0.12f));
+        draw->drawSegment({CX - w0 / 2.f, y0}, {CX - w1 / 2.f, TOP_Y}, 1.2f, COL_RAIL);
+        draw->drawSegment({CX + w0 / 2.f, y0}, {CX + w1 / 2.f, TOP_Y}, 1.2f, COL_RAIL);
+
+        // faint rungs scrolling past
+        float phase = fmodf(px, GRID_UNITS);
+        if (phase < 0.f) phase += GRID_UNITS;
+        for (float d = GRID_UNITS - phase; d < look; d += GRID_UNITS) {
+            float f = fOf(d);
+            float y = yOfF(f);
+            float w = wOfF(f);
+            draw->drawSegment({CX - w / 2.f, y}, {CX + w / 2.f, y}, 0.8f, withAlpha(COL_GRID, COL_GRID.a * (1.f - f)));
+        }
+
+        // the bars
+        float gz = GREEN_SEC * g_vel;
         for (size_t i = 0; i < notes.size(); i++) {
             float d0 = notes[i].start - px; // distance to the press
             float d1 = notes[i].end - px;   // distance to the release
@@ -356,38 +382,68 @@ class $modify(HighwayLayer, PlayLayer) {
             if (d1 < -3.f) continue;  // already finished
             if (d0 > look) break;     // too far ahead (notes are in order)
 
-            float yb = yOf(d0);
-            float yt = yOf(d1);
+            float fb = fOf(d0);
+            float yb = yOfF(fb);
+            float yt = yOfF(fOf(d1));
+            float scaleB = wOfF(fb) / LANE_W; // 1 at the line, smaller far away
 
             // keep a visible gap before the next bar
             if (i + 1 < notes.size()) {
-                float nb = yOf(notes[i + 1].start - px);
-                yt = std::min(yt, nb - GAP);
+                float nyb = yOfF(fOf(notes[i + 1].start - px));
+                yt = std::min(yt, nyb - GAP * scaleB);
             }
-            if (yt < yb + MIN_H) yt = yb + MIN_H;
+            float minH = MIN_H * scaleB;
+            if (yt < yb + minH) yt = yb + minH;
+
+            float ft = std::clamp((yt - HIT_Y) / yRange, 0.f, 1.f);
+            float wb = wOfF(fb) * NOTE_FRAC;
+            float wt = wOfF(ft) * NOTE_FRAC;
 
             // fade in near the top
-            float a = std::clamp((look - d0) / (look * 0.15f), 0.f, 1.f);
+            float a = std::clamp((1.f - d0 / look) / 0.2f, 0.f, 1.f);
 
             // green ONLY while you are holding and the bar is on the line
-            bool active = g_holding && d0 <= GREEN_ZONE && d1 >= -GREEN_ZONE;
-
-            ccColor4F col = active ? COL_ACTIVE : COL_NOTE;
-            col.a *= a;
+            bool active = g_holding && d0 <= gz && d1 >= -gz;
+            ccColor4F base = active ? COL_ACTIVE : COL_NOTE;
 
             if (active) {
-                ccColor4F glow = COL_ACTIVE;
-                glow.a = 0.22f * a;
-                roundedRect(draw, cx - NOTE_W / 2.f - 4.f, yb - 4.f, NOTE_W + 8.f, (yt - yb) + 8.f, 10.f, glow);
+                quad(draw, {CX - wb / 2.f - 4.f, yb - 3.f}, {CX + wb / 2.f + 4.f, yb - 3.f},
+                           {CX + wt / 2.f + 4.f, yt + 3.f}, {CX - wt / 2.f - 4.f, yt + 3.f},
+                     withAlpha(COL_ACTIVE, 0.20f * a));
             }
 
-            roundedRect(draw, cx - NOTE_W / 2.f, yb, NOTE_W, yt - yb, 7.f, col);
+            // rung body: dark inside, bright outline
+            quad(draw, {CX - wb / 2.f, yb}, {CX + wb / 2.f, yb},
+                       {CX + wt / 2.f, yt}, {CX - wt / 2.f, yt},
+                 withAlpha(base, (active ? 0.45f : 0.28f) * a), 1.6f, withAlpha(base, a));
 
-            // little shine on top of longer bars
-            if (yt - yb > 14.f) {
-                roundedRect(draw, cx - NOTE_W / 2.f + 5.f, yt - 6.f, NOTE_W - 10.f, 2.f, 1.f,
-                            {1.f, 1.f, 1.f, 0.28f * a});
-            }
+            // little block in the middle of the bar
+            float headZone = std::min(yt - yb, 16.f * scaleB);
+            float hs = headZone * 0.5f;
+            float hw = hs * 1.5f;
+            float hy = yb + headZone * 0.25f;
+            quad(draw, {CX - hw / 2.f, hy}, {CX + hw / 2.f, hy},
+                       {CX + hw / 2.f, hy + hs}, {CX - hw / 2.f, hy + hs},
+                 withAlpha(base, a));
         }
+
+        // hit zone glow (lights up while you hold)
+        ccColor4F hitCol = g_holding ? COL_ACTIVE : COL_GOLD;
+        if (g_holding) {
+            quad(draw, {CX - w0 / 2.f, HIT_Y - 7.f}, {CX + w0 / 2.f, HIT_Y - 7.f},
+                       {CX + w0 / 2.f, HIT_Y + 7.f}, {CX - w0 / 2.f, HIT_Y + 7.f},
+                 withAlpha(COL_ACTIVE, 0.22f));
+        }
+
+        // gold hit bar
+        draw->drawSegment({CX - w0 / 2.f - 3.f, HIT_Y}, {CX + w0 / 2.f + 3.f, HIT_Y}, 2.2f, hitCol);
+
+        // arrows pointing at the hit bar
+        float lx = CX - w0 / 2.f - 14.f;
+        float rx = CX + w0 / 2.f + 14.f;
+        draw->drawSegment({lx - 5.f, HIT_Y + 10.f}, {lx + 5.f, HIT_Y}, 1.8f, hitCol);
+        draw->drawSegment({lx - 5.f, HIT_Y - 10.f}, {lx + 5.f, HIT_Y}, 1.8f, hitCol);
+        draw->drawSegment({rx + 5.f, HIT_Y + 10.f}, {rx - 5.f, HIT_Y}, 1.8f, hitCol);
+        draw->drawSegment({rx + 5.f, HIT_Y - 10.f}, {rx - 5.f, HIT_Y}, 1.8f, hitCol);
     }
 };
