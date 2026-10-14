@@ -14,17 +14,17 @@
 using namespace geode::prelude;
 
 // ================= SETTINGS YOU CAN TWEAK =================
-const float LOOK_SECONDS  = 1.0f;   // how many seconds ahead the bars show (at speed 1x)
+const float LOOK_SECONDS  = 1.6f;   // seconds ahead the bars show at 1x (bigger = bars travel slower)
 const float MARGIN        = 10.f;   // distance from the screen corner
-const float CX            = 62.f;   // center of the highway
-const float LANE_W        = 84.f;   // width of the highway at the bottom
-const float FAR_SCALE     = 0.42f;  // how narrow it gets at the top (smaller = more perspective)
-const float PERSP_K       = 1.6f;   // how much bars speed up near the line
+const float CX            = 66.f;   // center of the highway
+const float LANE_W        = 90.f;   // width of the highway at the bottom
+const float FAR_SCALE     = 0.50f;  // how narrow it gets at the top (smaller = more perspective)
+const float PERSP_K       = 1.0f;   // how much bars speed up near the line (lower = more even spacing)
 const float HIT_Y         = 30.f;   // height of the hit bar
-const float TOP_Y         = 175.f;  // height of the top of the highway
-const float NOTE_FRAC     = 0.82f;  // bar width compared to the lane
-const float MIN_H         = 12.f;   // shortest a bar can be
-const float GAP           = 4.f;    // empty space between back-to-back bars
+const float TOP_Y         = 205.f;  // height of the top of the highway (taller = more room between bars)
+const float NOTE_FRAC     = 0.70f;  // bar width compared to the lane
+const float MIN_H         = 7.f;    // shortest a bar can be
+const float GAP           = 7.f;    // empty space between back-to-back bars
 const float GRID_UNITS    = 80.f;   // spacing of the faint rungs
 const float GREEN_SEC     = 0.05f;  // how close to the line a bar must be to turn green
 
@@ -72,6 +72,8 @@ static float g_vel       = 311.58f; // how fast the player moves (units per seco
 static bool  g_holding   = false;
 static float g_speed     = 1.f;
 static bool  g_popupOpen = false;
+static bool  g_enabled   = true;    // highway on/off
+static bool  g_glass     = false;   // menu style: false = classic, true = glass
 
 static ccColor4F withAlpha(ccColor4F c, float a) {
     c.a = a;
@@ -84,6 +86,26 @@ static void quad(CCDrawNode* n, CCPoint a, CCPoint b, CCPoint c, CCPoint d,
                  ccColor4F border = {0.f, 0.f, 0.f, 0.f}) {
     CCPoint pts[4] = {a, b, c, d};
     n->drawPolygon(pts, 4, fill, borderW, border);
+}
+
+// Filled rounded rectangle (used for the glass menu)
+static void roundRect(CCDrawNode* n, float x, float y, float w, float h, float r,
+                      ccColor4F fill, float borderW = 0.f,
+                      ccColor4F border = {0.f, 0.f, 0.f, 0.f}) {
+    r = std::min(r, std::min(w, h) / 2.f);
+    const int seg = 10;
+    const float PI = 3.14159265f;
+    CCPoint centers[4] = {{x + w - r, y + r}, {x + w - r, y + h - r}, {x + r, y + h - r}, {x + r, y + r}};
+    float startDeg[4] = {-90.f, 0.f, 90.f, 180.f};
+
+    std::vector<CCPoint> pts;
+    for (int k = 0; k < 4; k++) {
+        for (int i = 0; i <= seg; i++) {
+            float a = (startDeg[k] + 90.f * i / seg) * PI / 180.f;
+            pts.push_back({centers[k].x + r * cosf(a), centers[k].y + r * sinf(a)});
+        }
+    }
+    n->drawPolygon(pts.data(), (unsigned int)pts.size(), fill, borderW, border);
 }
 
 // Save this attempt's new clicks into the level's chart
@@ -154,25 +176,48 @@ class $modify(RecordLayer, GJBaseGameLayer) {
 class SpeedPopup : public Popup {
 protected:
     TextInput* m_input = nullptr;
+    ButtonSprite* m_styleSpr = nullptr;
+    CCMenuItemToggler* m_toggler = nullptr;
 
     bool init() {
-        if (!Popup::init(280.f, 170.f)) return false;
+        if (!Popup::init(280.f, 230.f)) return false;
         this->setTitle("Click Highway");
 
+        // load saved settings
+        g_glass = Mod::get()->getSavedValue<bool>("glass", false);
+        g_enabled = Mod::get()->getSavedValue<bool>("enabled", true);
+
+        // on / off switch
+        auto onLabel = CCLabelBMFont::create("Highway on/off", "bigFont.fnt");
+        onLabel->setScale(0.45f);
+        m_mainLayer->addChildAtPosition(onLabel, Anchor::Center, {-25.f, 72.f});
+
+        m_toggler = CCMenuItemToggler::createWithStandardSprites(
+            this, menu_selector(SpeedPopup::onToggle), 0.7f);
+        m_toggler->toggle(g_enabled);
+        m_buttonMenu->addChildAtPosition(m_toggler, Anchor::Center, {85.f, 72.f});
+
+        // speed
         auto label = CCLabelBMFont::create("Bar speed multiplier", "bigFont.fnt");
         label->setScale(0.45f);
-        m_mainLayer->addChildAtPosition(label, Anchor::Center, {0.f, 26.f});
+        m_mainLayer->addChildAtPosition(label, Anchor::Center, {0.f, 34.f});
 
         m_input = TextInput::create(110.f, "1", "bigFont.fnt");
         m_input->setFilter("0123456789.");
         m_input->setMaxCharCount(5);
         m_input->setString(fmt::format("{}", g_speed));
-        m_mainLayer->addChildAtPosition(m_input, Anchor::Center, {0.f, -4.f});
+        m_mainLayer->addChildAtPosition(m_input, Anchor::Center, {0.f, 4.f});
 
         auto hint = CCLabelBMFont::create("0.5 = slower bars    2 = faster bars", "chatFont.fnt");
         hint->setScale(0.6f);
         hint->setOpacity(160);
-        m_mainLayer->addChildAtPosition(hint, Anchor::Center, {0.f, -34.f});
+        m_mainLayer->addChildAtPosition(hint, Anchor::Center, {0.f, -22.f});
+
+        // menu style switch
+        m_styleSpr = ButtonSprite::create("Style: Classic");
+        auto styleBtn = CCMenuItemSpriteExtra::create(
+            m_styleSpr, this, menu_selector(SpeedPopup::onStyle));
+        m_buttonMenu->addChildAtPosition(styleBtn, Anchor::Bottom, {0.f, 68.f});
 
         auto applyBtn = CCMenuItemSpriteExtra::create(
             ButtonSprite::create("Apply"), this, menu_selector(SpeedPopup::onApply));
@@ -182,7 +227,50 @@ protected:
             ButtonSprite::create("Reset"), this, menu_selector(SpeedPopup::onReset));
         m_buttonMenu->addChildAtPosition(resetBtn, Anchor::Bottom, {50.f, 26.f});
 
+        this->applyStyle();
         return true;
+    }
+
+    // Swap between the original menu look and the glass look
+    void applyStyle() {
+        if (auto old = m_mainLayer->getChildByID("glass-bg")) old->removeFromParent();
+
+        if (m_bgSprite) m_bgSprite->setVisible(!g_glass);
+
+        if (g_glass) {
+            auto size = m_mainLayer->getContentSize();
+            auto node = CCDrawNode::create();
+            node->setID("glass-bg");
+
+            float w = size.width, h = size.height, r = 26.f;
+
+            // soft shadow under the panel
+            roundRect(node, 2.f, -4.f, w - 4.f, h, r, {0.f, 0.f, 0.f, 0.22f});
+            // frosted body with a light edge
+            roundRect(node, 0.f, 0.f, w, h, r,
+                      {0.78f, 0.88f, 1.f, 0.17f}, 1.4f, {1.f, 1.f, 1.f, 0.55f});
+            // glossy sheen across the top half
+            roundRect(node, 4.f, h * 0.52f, w - 8.f, h * 0.48f - 4.f, r - 4.f,
+                      {1.f, 1.f, 1.f, 0.09f});
+            // thin bright highlight along the top edge
+            node->drawSegment({r, h - 2.f}, {w - r, h - 2.f}, 0.8f, {1.f, 1.f, 1.f, 0.7f});
+
+            m_mainLayer->addChild(node, -1);
+        }
+
+        if (m_styleSpr) m_styleSpr->setString(g_glass ? "Style: Glass" : "Style: Classic");
+    }
+
+    void onToggle(CCObject* sender) {
+        // the toggler reports its state from before the click
+        g_enabled = !static_cast<CCMenuItemToggler*>(sender)->isToggled();
+        Mod::get()->setSavedValue<bool>("enabled", g_enabled);
+    }
+
+    void onStyle(CCObject*) {
+        g_glass = !g_glass;
+        Mod::get()->setSavedValue<bool>("glass", g_glass);
+        this->applyStyle();
     }
 
     void onApply(CCObject*) {
@@ -272,6 +360,7 @@ class $modify(HighwayLayer, PlayLayer) {
         // create the drawing area and the judgement text once
         if (!m_fields->draw) {
             g_speed = Mod::get()->getSavedValue<float>("speed", 1.f);
+            g_enabled = Mod::get()->getSavedValue<bool>("enabled", true);
 
             auto node = CCDrawNode::create();
             node->setPosition({MARGIN, MARGIN});
@@ -308,8 +397,19 @@ class $modify(HighwayLayer, PlayLayer) {
         auto const& notes = cit->second.notes;
         if (g_state.size() != notes.size()) g_state.resize(notes.size(), 0);
 
-        // ---- judge your presses ----
         float goodU = GOOD_MS / 1000.f * g_vel; // window in level units
+
+        // ---- highway turned off: keep recording, but draw and judge nothing ----
+        if (!g_enabled) {
+            for (size_t i = 0; i < notes.size(); i++) {
+                if (g_state[i] == 0 && px > notes[i].start + goodU) g_state[i] = 2; // skip silently
+            }
+            g_presses.clear();
+            if (m_fields->judge) m_fields->judge->setOpacity(0);
+            return;
+        }
+
+        // ---- judge your presses ----
         for (float pressX : g_presses) {
             int best = -1;
             float bestD = goodU + 0.01f;
@@ -338,7 +438,8 @@ class $modify(HighwayLayer, PlayLayer) {
         if (notes.empty()) return;
 
         // ---- draw the highway ----
-        float look   = std::max(g_vel * LOOK_SECONDS * g_speed, 50.f);
+        // bigger speed multiplier = bars move faster, smaller = slower
+        float look   = std::max(g_vel * LOOK_SECONDS / std::max(g_speed, 0.1f), 50.f);
         float yRange = TOP_Y - HIT_Y;
 
         // distance ahead -> how far up the highway (0 to 1), speeding up near the line
@@ -387,13 +488,20 @@ class $modify(HighwayLayer, PlayLayer) {
             float yt = yOfF(fOf(d1));
             float scaleB = wOfF(fb) / LANE_W; // 1 at the line, smaller far away
 
-            // keep a visible gap before the next bar
-            if (i + 1 < notes.size()) {
+            // always keep a visible gap before the next bar
+            bool hasNext = (i + 1 < notes.size());
+            float maxTop = 0.f;
+            if (hasNext) {
                 float nyb = yOfF(fOf(notes[i + 1].start - px));
-                yt = std::min(yt, nyb - GAP * scaleB);
+                maxTop = nyb - GAP * scaleB;
+                yt = std::min(yt, maxTop);
             }
             float minH = MIN_H * scaleB;
-            if (yt < yb + minH) yt = yb + minH;
+            if (yt < yb + minH) {
+                yt = yb + minH;
+                // if the minimum height would swallow the gap, squeeze the bar instead
+                if (hasNext && yt > maxTop) yt = std::max(yb + 3.f * scaleB, maxTop);
+            }
 
             float ft = std::clamp((yt - HIT_Y) / yRange, 0.f, 1.f);
             float wb = wOfF(fb) * NOTE_FRAC;
@@ -407,24 +515,18 @@ class $modify(HighwayLayer, PlayLayer) {
             ccColor4F base = active ? COL_ACTIVE : COL_NOTE;
 
             if (active) {
-                quad(draw, {CX - wb / 2.f - 4.f, yb - 3.f}, {CX + wb / 2.f + 4.f, yb - 3.f},
-                           {CX + wt / 2.f + 4.f, yt + 3.f}, {CX - wt / 2.f - 4.f, yt + 3.f},
-                     withAlpha(COL_ACTIVE, 0.20f * a));
+                quad(draw, {CX - wb / 2.f - 3.f, yb - 2.f}, {CX + wb / 2.f + 3.f, yb - 2.f},
+                           {CX + wt / 2.f + 3.f, yt + 2.f}, {CX - wt / 2.f - 3.f, yt + 2.f},
+                     withAlpha(COL_ACTIVE, 0.18f * a));
             }
 
-            // rung body: dark inside, bright outline
+            // slim bar body: light fill, thin bright outline
             quad(draw, {CX - wb / 2.f, yb}, {CX + wb / 2.f, yb},
                        {CX + wt / 2.f, yt}, {CX - wt / 2.f, yt},
-                 withAlpha(base, (active ? 0.45f : 0.28f) * a), 1.6f, withAlpha(base, a));
+                 withAlpha(base, (active ? 0.40f : 0.22f) * a), 1.2f, withAlpha(base, a));
 
-            // little block in the middle of the bar
-            float headZone = std::min(yt - yb, 16.f * scaleB);
-            float hs = headZone * 0.5f;
-            float hw = hs * 1.5f;
-            float hy = yb + headZone * 0.25f;
-            quad(draw, {CX - hw / 2.f, hy}, {CX + hw / 2.f, hy},
-                       {CX + hw / 2.f, hy + hs}, {CX - hw / 2.f, hy + hs},
-                 withAlpha(base, a));
+            // bright cap on the bottom edge = the exact moment to click
+            draw->drawSegment({CX - wb / 2.f, yb}, {CX + wb / 2.f, yb}, 2.4f, withAlpha(base, a));
         }
 
         // hit zone glow (lights up while you hold)
